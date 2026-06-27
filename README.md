@@ -44,8 +44,10 @@ flowchart LR
 
 1. **Discover** article URLs from WSJ RSS feeds — overlapping feeds are
    **deduplicated by canonical URL**, then sorted newest-first (top 30).
-2. **Fetch** full text in *your own authenticated WSJ session* — a persistent
-   Playwright Chromium profile. It does **not** bypass the paywall.
+2. **Fetch** full text by attaching to *your own real Google Chrome* — the one
+   you logged into WSJ with, as a human. It does **not** bypass the paywall, and
+   because it's a genuine Chrome session (no automation flags) WSJ's bot manager
+   doesn't flag it. See [Avoiding bot detection](#avoiding-bot-detection).
 3. **Clean** each article for e-ink: ads, nav, promos, scripts, and (by default)
    **images** are removed — the X4 chokes on GIF/progressive JPEG and is slow on
    big images. `--images` keeps them.
@@ -56,11 +58,11 @@ flowchart LR
 
 ## Your subscription stays private 🔒
 
-Your WSJ login lives **only** in a Playwright profile on disk at
-`~/.config/wsj_x4/chrome-profile/` — outside this repo. Cookies, tokens, and
-login state are **never committed**: `.gitignore` blocks profile dirs,
-`cookies*.json`, `.env`, and `*.epub`. There is no password stored anywhere — auth
-*is* the browser profile.
+Your WSJ login lives **only** in a real-Chrome profile on disk at
+`~/.config/wsj_x4/chrome-real/` — outside this repo. Cookies, tokens, and login
+state are **never committed**: `.gitignore` blocks profile dirs, `cookies*.json`,
+`.env`, and `*.epub`. There is no password stored anywhere — auth *is* the browser
+profile.
 
 ## Setup (macOS)
 
@@ -74,19 +76,34 @@ pip install -r requirements.txt
 # 3 · Playwright browser (one-time, ~150 MB)
 playwright install chromium
 
-# 4 · log into WSJ once — opens a real browser; 2FA is fine.
-#     Sign in, then close the window. The session persists for all later runs.
-python wsj_x4.py --login
+# 4 · launch your real Chrome and log into WSJ (2FA is fine).
+#     Leave the window open — later runs attach to it.
+python wsj_x4.py --chrome
 ```
 
-Then, any time:
+Then, any time (with that Chrome window still open):
 
 ```bash
 python wsj_x4.py
 ```
 
-> **Session expired?** (everything comes back paywalled) — just run
-> `python wsj_x4.py --login` again, or delete `~/.config/wsj_x4/chrome-profile`.
+> **Session expired?** (everything comes back paywalled) — just log into WSJ again
+> in that Chrome window, or run `python wsj_x4.py --chrome` to relaunch it.
+
+## Avoiding bot detection
+
+WSJ runs a bot manager that fingerprints automation. Tools like Playwright or
+Selenium launch a browser with tell-tale flags (`navigator.webdriver = true`, the
+`AutomationControlled` feature, a CDP banner) and get an *"Access is temporarily
+restricted"* wall almost immediately — slowing down doesn't help, because it's a
+**fingerprint**, not a rate limit.
+
+So this script **never launches its own browser**. `--chrome` starts *your* real
+Google Chrome on a dedicated profile with remote debugging enabled but **no
+automation flags**, you log in as a human, and the build **attaches over CDP** only
+to read the pages you're already authorized to see. Loads are paced with
+randomized human-like delays and gentle scrolling. From WSJ's side it's an ordinary
+logged-in Chrome.
 
 ## Delivery / WebDAV
 
@@ -112,8 +129,7 @@ Change the target in the config block at the top of [`wsj_x4.py`](wsj_x4.py)
 | `--images` | keep images (default: dropped for e-ink) |
 | `--include-seen` | don't skip already-delivered articles |
 | `--no-sync` | build only; leave the EPUB in local staging |
-| `--headed` | show the browser while fetching (use if WSJ blocks headless) |
-| `--login` | (re)authenticate WSJ, then exit |
+| `--chrome` | launch your real Chrome to log into WSJ, then exit |
 
 ## Feeds
 

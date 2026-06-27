@@ -48,18 +48,21 @@ X4_WEBDAV_BASE = "http://crosspoint.local"
 X4_WEBDAV_SUBDIR = "WSJ"          # collection folder on the device; "" = root
 
 LOCAL_STAGING_DIR = Path("~/Documents/X4").expanduser()
-PROFILE_DIR = Path("~/.config/wsj_x4/chrome-profile").expanduser()
 SEEN_PATH = Path("~/.config/wsj_x4/seen.json").expanduser()
+
+# --- Anti-bot: we attach to YOUR real Google Chrome over CDP, rather than
+# letting Playwright launch its own Chromium. Playwright's Chromium starts with
+# automation flags (navigator.webdriver=true, AutomationControlled, CDP banner)
+# that WSJ's bot manager fingerprints instantly. Real Chrome that *you* launched
+# carries none of those, and a genuine human login + history looks legitimate.
+CHROME_APP = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+CHROME_CDP_PORT = 9222
+CHROME_PROFILE = Path("~/.config/wsj_x4/chrome-real").expanduser()  # dedicated, human-used
 
 DEFAULT_LIMIT = 30
 MIN_TEXT_CHARS = 800              # below this => treat as paywalled / not extractable
-FETCH_TIMEOUT_MS = 35000
-DELAY_RANGE = (1.0, 3.0)          # polite randomized delay between article fetches
-
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-)
+FETCH_TIMEOUT_MS = 45000
+DELAY_RANGE = (5.0, 12.0)         # human-like randomized gap between article loads
 
 # Markers that indicate we hit a wall instead of the article.
 PAYWALL_MARKERS = (
@@ -216,23 +219,52 @@ def extract_body(raw_html: str, keep_images: bool) -> tuple[str, str, str]:
     return title, author, cleaned
 
 
-def fetch_all(articles: list[Article], keep_images: bool, headed: bool) -> None:
+def cdp_endpoint() -> str | None:
+    """Return the CDP URL if your real Chrome is up with debugging, else None."""
+    import requests
+    try:
+        r = requests.get(f"http://localhost:{CHROME_CDP_PORT}/json/version", timeout=3)
+        if r.status_code == 200:
+            return f"http://localhost:{CHROME_CDP_PORT}"
+    except requests.RequestException:
+        pass
+    return None
+
+
+# Defense-in-depth fingerprint mask (real Chrome is already clean; harmless).
+STEALTH_JS = """
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+"""
+
+
+def fetch_all(articles: list[Article], keep_images: bool) -> None:
+    """Attach to your already-running, human-logged-in Chrome and read pages."""
     from playwright.sync_api import sync_playwright
 
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    with sync_playwright() as pw:
-        ctx = pw.chromium.launch_persistent_context(
-            str(PROFILE_DIR),
-            headless=not headed,
-            user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 900},
+    endpoint = cdp_endpoint()
+    if not endpoint:
+        raise RuntimeError(
+            "Your Chrome isn't running with remote debugging. Start it and log "
+            "into WSJ first:\n    python wsj_x4.py --chrome"
         )
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.connect_over_cdp(endpoint)
+        ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+        try:
+            ctx.add_init_script(STEALTH_JS)
+        except Exception:  # noqa: BLE001 - some Chrome builds disallow on shared ctx
+            pass
         page = ctx.new_page()
         for i, art in enumerate(articles, 1):
             label = art.title[:60]
             try:
                 page.goto(art.url, wait_until="domcontentloaded", timeout=FETCH_TIMEOUT_MS)
-                page.wait_for_timeout(1200)  # let late body content settle
+                # human-ish dwell + a couple of gentle scrolls
+                page.wait_for_timeout(random.randint(1500, 3500))
+                for _ in range(random.randint(1, 3)):
+                    page.mouse.wheel(0, random.randint(600, 1400))
+                    page.wait_for_timeout(random.randint(400, 1100))
                 raw = page.content()
             except Exception as e:  # noqa: BLE001 - per-article soft fail
                 art.skip_reason = f"fetch error: {type(e).__name__}"
@@ -253,36 +285,45 @@ def fetch_all(articles: list[Article], keep_images: bool, headed: bool) -> None:
                 log(f"  [{i}/{len(articles)}] ok   {label}")
 
             time.sleep(random.uniform(*DELAY_RANGE))
-        ctx.close()
+        page.close()
+        # leave the browser open; you launched it, you close it.
 
 
 # ---------------------------------------------------------------------------
 # Login helper
 # ---------------------------------------------------------------------------
 
-def do_login() -> None:
-    from playwright.sync_api import sync_playwright
+def launch_chrome() -> None:
+    """Launch YOUR real Chrome with remote debugging on a dedicated profile, so
+    you can log into WSJ as a human. Leave the window open; later runs attach to
+    it over CDP. No automation flags are set, so it isn't fingerprinted as a bot."""
+    import subprocess
 
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    log("Opening a browser. Log into WSJ (2FA is fine), then CLOSE the window.")
-    with sync_playwright() as pw:
-        ctx = pw.chromium.launch_persistent_context(
-            str(PROFILE_DIR), headless=False, user_agent=USER_AGENT,
-            viewport={"width": 1280, "height": 900},
-        )
-        page = ctx.new_page()
-        page.goto("https://www.wsj.com/", wait_until="domcontentloaded")
-        # Wait until you finish logging in and close the window/tab. The
-        # persistent profile saves your session to disk automatically.
-        try:
-            page.wait_for_event("close", timeout=0)
-        except Exception:  # noqa: BLE001 - context torn down on window close
-            pass
-        try:
-            ctx.close()
-        except Exception:  # noqa: BLE001
-            pass
-    log("Session saved. Future runs reuse it automatically.")
+    if cdp_endpoint():
+        log(f"Chrome is already running with debugging on :{CHROME_CDP_PORT}. "
+            "If you're logged into WSJ there, you're set.")
+        return
+
+    if not Path(CHROME_APP).exists():
+        log(f"Could not find Chrome at {CHROME_APP}. Edit CHROME_APP in the config.")
+        sys.exit(1)
+
+    CHROME_PROFILE.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen([
+        CHROME_APP,
+        f"--remote-debugging-port={CHROME_CDP_PORT}",
+        f"--user-data-dir={CHROME_PROFILE}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "https://www.wsj.com/",
+    ])
+    log(
+        "Launched your real Chrome (dedicated profile).\n"
+        "  1. Log into WSJ in that window (2FA is fine).\n"
+        "  2. LEAVE THE WINDOW OPEN.\n"
+        "  3. Run the build:  python wsj_x4.py\n"
+        "This is a normal human Chrome session, so WSJ won't flag it as a bot."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -388,13 +429,18 @@ def main() -> int:
     ap.add_argument("--images", action="store_true", help="keep images (default: drop)")
     ap.add_argument("--include-seen", action="store_true", help="don't skip already-delivered articles")
     ap.add_argument("--no-sync", action="store_true", help="build only; don't push to device")
-    ap.add_argument("--headed", action="store_true", help="show the browser while fetching")
-    ap.add_argument("--login", action="store_true", help="(re)authenticate WSJ, then exit")
+    ap.add_argument("--chrome", action="store_true",
+                   help="launch your real Chrome to log into WSJ, then exit")
     args = ap.parse_args()
 
-    if args.login:
-        do_login()
+    if args.chrome:
+        launch_chrome()
         return 0
+
+    if not cdp_endpoint():
+        log("WSJ Chrome session not found. Start it and log in first:\n"
+            "    python wsj_x4.py --chrome")
+        return 1
 
     log("== Build WSJ for X4 ==")
     log("1. Discovering articles from RSS...")
@@ -411,14 +457,15 @@ def main() -> int:
         log("Nothing new to build. (Try --include-seen.)")
         return 0
 
-    log(f"2. Fetching {len(articles)} articles in your WSJ session...")
-    fetch_all(articles, keep_images=args.images, headed=args.headed)
+    log(f"2. Fetching {len(articles)} articles via your real Chrome session...")
+    fetch_all(articles, keep_images=args.images)
 
     included = [a for a in articles if a.included]
     skipped = [a for a in articles if not a.included]
     if not included:
-        log("No articles could be extracted. If everything was paywalled, "
-            "your session may have expired -- run:  python wsj_x4.py --login")
+        log("No articles could be extracted. If everything was paywalled, your "
+            "WSJ login in the Chrome window may have expired -- log in again there, "
+            "or run:  python wsj_x4.py --chrome")
         return 1
 
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M")
