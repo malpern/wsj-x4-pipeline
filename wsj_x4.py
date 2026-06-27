@@ -386,16 +386,19 @@ def build_epub(articles: list[Article], out_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def device_reachable() -> bool:
-    import requests
+    """Fast TCP connect to the device's web port. We deliberately avoid a WebDAV
+    PROPFIND/GET probe: this device's *read* endpoints hang for seconds even when
+    it's online and accepts PUT fine, so a read-based check false-negatives. A
+    plain socket connect is fast and is the honest signal for 'device awake'."""
+    import socket
+    p = urlparse(X4_WEBDAV_BASE)
+    host = p.hostname or ""
+    port = p.port or (443 if p.scheme == "https" else 80)
     try:
-        r = requests.request("PROPFIND", X4_WEBDAV_BASE + "/", timeout=5,
-                             headers={"Depth": "0"})
-        return r.status_code < 500
-    except requests.RequestException:
-        try:
-            return requests.get(X4_WEBDAV_BASE + "/", timeout=5).status_code < 500
-        except requests.RequestException:
-            return False
+        with socket.create_connection((host, port), timeout=4):
+            return True
+    except OSError:
+        return False
 
 
 def deliver(epub_path: Path) -> str:
