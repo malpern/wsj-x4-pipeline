@@ -264,7 +264,7 @@ def do_login() -> None:
     from playwright.sync_api import sync_playwright
 
     PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    log("Opening a browser. Log into WSJ (2FA is fine), then return here.")
+    log("Opening a browser. Log into WSJ (2FA is fine), then CLOSE the window.")
     with sync_playwright() as pw:
         ctx = pw.chromium.launch_persistent_context(
             str(PROFILE_DIR), headless=False, user_agent=USER_AGENT,
@@ -272,8 +272,16 @@ def do_login() -> None:
         )
         page = ctx.new_page()
         page.goto("https://www.wsj.com/", wait_until="domcontentloaded")
-        input(">> Press Enter here once you are logged in... ")
-        ctx.close()
+        # Wait until you finish logging in and close the window/tab. The
+        # persistent profile saves your session to disk automatically.
+        try:
+            page.wait_for_event("close", timeout=0)
+        except Exception:  # noqa: BLE001 - context torn down on window close
+            pass
+        try:
+            ctx.close()
+        except Exception:  # noqa: BLE001
+            pass
     log("Session saved. Future runs reuse it automatically.")
 
 
