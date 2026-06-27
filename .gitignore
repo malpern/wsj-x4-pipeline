@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# SECURITY: never commit the authenticated WSJ session.
+# The Playwright profile and seen-cache live under ~/.config/wsj_x4/ by default
+# (outside this repo), but if you ever relocate them into the repo, these rules
+# keep cookies, tokens, and login state out of git.
+# ---------------------------------------------------------------------------
+chrome-profile/
+*chrome-profile*/
+wsj_x4-profile/
+seen.json
+cookies*.json
+*.cookies
+.env
+.env.*
+secrets*.env
+
+# Built newspapers / staging
+*.epub
+Documents/X4/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+
+# macOS
+.DS_Store

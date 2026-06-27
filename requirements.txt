@@ -1,0 +1,7 @@
+feedparser>=6.0
+playwright>=1.44
+beautifulsoup4>=4.12
+readability-lxml>=0.8.1
+ebooklib>=0.18
+Pillow>=10.0
+requests>=2.31
